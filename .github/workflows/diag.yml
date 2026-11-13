@@ -1,0 +1,30 @@
+name: Diagnostics
+
+# 诊断用：确认 runner 是否可用、Xcode 版本、以及 job 能不能正常启动
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  ubuntu:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 环境信息
+        run: |
+          echo "ubuntu runner 正常"
+          uname -a
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - name: Xcode 版本
+        run: |
+          echo "macos runner 正常"
+          xcodebuild -version
+
+      - name: 可用 SDK
+        run: xcodebuild -showsdks | head -30
+
+      - name: xcodegen 能否安装
+        run: brew install xcodegen && xcodegen --version
