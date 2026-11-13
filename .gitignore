@@ -1,0 +1,17 @@
+# 原始数据（63MB ECDICT 全量 csv，只用于构建词典子集，不进仓库也不进包）
+data/_raw/
+
+# iOS 构建中间产物
+ios/www/
+ios/CiYi.xcodeproj/
+ios/build/
+out/
+
+# Android 构建中间产物
+android/build/
+
+# 临时文件
+_*.png
+*.log
+.DS_Store
+Thumbs.db

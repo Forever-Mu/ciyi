@@ -1,0 +1,31 @@
+name: CiYi
+options:
+  bundleIdPrefix: com.wordmemory
+  deploymentTarget:
+    iOS: "14.0"
+  createIntermediateGroups: true
+
+targets:
+  CiYi:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: www
+        type: folder
+    settings:
+      base:
+        PRODUCT_NAME: CiYi
+        PRODUCT_BUNDLE_IDENTIFIER: com.wordmemory.app
+        INFOPLIST_FILE: Resources/Info.plist
+        MARKETING_VERSION: "1.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: "NO"
+        # 不签名：产出的 .app/.ipa 由使用者自己用 Apple ID 重签
+        # 注意必须写带引号的 "NO"，裸写 NO 会被 YAML 解析成布尔值
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGN_IDENTITY: ""
+        ENABLE_BITCODE: "NO"

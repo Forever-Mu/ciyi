@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>词忆 · 界面预览（开发工具）</title>
+<style>
+  html,body{margin:0;height:100%;background:#eef0f5;
+    font-family:-apple-system,"Segoe UI","PingFang SC",system-ui,sans-serif;}
+  #bar{padding:6px 12px;font-size:12px;color:#5a6072;background:#fff;border-bottom:1px solid #e3e6ee;}
+  #bar b{color:#4f46e5;}
+  iframe{display:block;border:0;width:100%;height:calc(100% - 30px);background:#f5f6fa;}
+</style>
+</head>
+<body>
+<div id="bar">界面预览 · 目标：<b id="label">…</b></div>
+<iframe id="f" src="../index.html#study"></iframe>
+
+<script type="module">
+// 开发用：把 App 装进 iframe，然后调用它自己的钩子把界面推到某个状态，方便截图看真实排版
+const params = new URLSearchParams(location.search);
+const step = params.get('step') || 'session';
+const route = params.get('route') || 'study';
+document.getElementById('label').textContent = `${route} / ${step}`;
+document.getElementById('f').src = `../index.html#${route}`;
+
+const f = document.getElementById('f');
+let done = false;
+
+f.addEventListener('load', async () => {
+  if (done) return;
+  const w = f.contentWindow;
+  // 等 App 启动完成
+  for (let i = 0; i < 200; i++) {
+    if (w.__APP__ && w.document.getElementById('app') && !w.document.getElementById('app').hidden) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  if (!w.__APP__) { document.getElementById('label').textContent = 'App 未就绪'; return; }
+  done = true;
+
+  const APP = w.__APP__;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  if (step === 'session') {
+    APP.navigate('study');
+    await sleep(300);
+    // 优先开始旧词复习；没有就开新词
+    const d = APP.S.db.get(
+      `SELECT kind, COUNT(*) AS c FROM daily_tasks
+        WHERE local_date = (SELECT MAX(local_date) FROM daily_tasks) AND status='pending'
+        GROUP BY kind`
+    );
+    const rows = APP.S.db.all(
+      `SELECT kind FROM daily_tasks
+        WHERE local_date = (SELECT MAX(local_date) FROM daily_tasks) AND status='pending'`
+    );
+    const hasReview = rows.some((r) => r.kind === 'review');
+    APP.startSession(hasReview ? 'review' : 'new');
+    await sleep(400);
+    const cur = APP.S.session && APP.S.session.current;
+    const dbg = cur ? JSON.stringify({
+      type: cur.q.type, prompt: cur.q.prompt, answer: cur.q.answer,
+      answerIndex: cur.q.answerIndex,
+      options: cur.q.options, n: cur.q.options.length,
+      word: cur.word && cur.word.word,
+      cn: cur.word && cur.word.original_translation,
+      confirmed: cur.word && cur.word.confirmed_translation,
+    }) : 'no session';
+    document.getElementById('label').textContent = '答题界面 · ' + dbg;
+  } else if (step === 'answer') {
+    APP.navigate('study');
+    await sleep(200);
+    APP.startSession('review');
+    await sleep(300);
+    const cur = APP.S.session && APP.S.session.current;
+    if (cur) {
+      if (cur.q.type === 'spell') APP.submitAnswer(cur.q.answer, null);
+      else APP.submitAnswer(cur.q.answerIndex, null);
+    }
+    await sleep(300);
+    document.getElementById('label').textContent = '答对后的反馈界面';
+  } else if (step === 'wrong') {
+    APP.navigate('study');
+    await sleep(200);
+    APP.startSession('review');
+    await sleep(300);
+    const cur = APP.S.session && APP.S.session.current;
+    if (cur) {
+      if (cur.q.type === 'spell') APP.submitAnswer('zzzz', null);
+      else APP.submitAnswer((cur.q.answerIndex + 1) % cur.q.options.length, null);
+    }
+    await sleep(300);
+    document.getElementById('label').textContent = '答错后的反馈界面';
+  } else if (step === 'check') {
+    // 把状态重置为待核对，再跑一次真实核对，好看到完整报告
+    APP.S.db.run(`UPDATE words SET translation_check_status='pending'`);
+    await APP.runTranslationCheck();
+    await sleep(600);
+    document.getElementById('label').textContent = '翻译核对报告';
+  } else {
+    document.getElementById('label').textContent = route + '（直接渲染）';
+  }
+});
+</script>
+</body>
+</html>

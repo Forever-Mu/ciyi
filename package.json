@@ -1,0 +1,10 @@
+{
+  "name": "en-word-memory",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "智能英语单词记忆 App —— 导入/翻译核对/离线学习/间隔重复",
+  "scripts": {
+    "test": "node test/run.mjs"
+  }
+}

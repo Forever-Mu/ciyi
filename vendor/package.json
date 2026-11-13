@@ -1,0 +1,4 @@
+{
+  "type": "commonjs",
+  "//": "此目录下是第三方 UMD 库（sql.js / fflate）。项目根是 type:module，这里显式声明 commonjs，否则 Node 会按 ESM 解析导致 module.exports 失效。"
+}

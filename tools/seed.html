@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>词忆 · 预览数据生成（开发工具）</title>
+<style>
+  body { font-family: -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+         margin:0; padding:32px; background:#f5f6fa; color:#1a1d27; line-height:1.7; }
+  .box { max-width:640px; margin:0 auto; background:#fff; border-radius:14px; padding:24px;
+         box-shadow:0 4px 24px rgba(20,24,40,.08); }
+  h1 { font-size:19px; margin:0 0 4px; }
+  .sub { font-size:13px; color:#8c93a5; margin-bottom:18px; }
+  pre { background:#f0f2f7; border-radius:10px; padding:14px; font-size:12.5px;
+        line-height:1.65; max-height:420px; overflow:auto; white-space:pre-wrap; }
+  .ok { color:#10b981; font-weight:600; }
+  .err { color:#ef4444; font-weight:600; }
+  a.btn { display:inline-block; margin-top:16px; padding:11px 20px; background:#4f46e5; color:#fff;
+          border-radius:10px; text-decoration:none; font-weight:600; font-size:14px; }
+  .note { margin-top:14px; padding:11px 14px; background:#eef0fe; border-radius:10px;
+          font-size:12.5px; color:#5a6072; }
+</style>
+</head>
+<body>
+<div class="box">
+  <h1>预览数据生成器</h1>
+  <div class="sub">开发工具 · 不参与打包 · 用真实 ECDICT 词条填充一批示例数据，方便预览有内容时的界面</div>
+  <pre id="log">准备中…</pre>
+  <div id="link"></div>
+  <div class="note">
+    这些单词与释义全部来自内置的离线词典（ECDICT），核对结果也是真跑算法得出的。
+    数据写进与本 App 相同的 IndexedDB，生成后打开 App 即可看到效果。
+    想清空，在 App 的「设置 → 我的词库」里删掉这个词库即可。
+  </div>
+</div>
+
+<script src="../vendor/sql-wasm.js"></script>
+<script src="../vendor/fflate.js"></script>
+<script type="module">
+import { createDB } from '../core/db.js';
+import { LocalDictionary, DictionaryService, loadSynonymMap } from '../core/dictionary.js';
+import { buildImportPreview, commitImport, checkWords, recordAnswer } from '../core/service.js';
+import { ensureDailyTasks, getPendingQueue, startPlan } from '../core/scheduler.js';
+import { today, addDays } from '../core/time.js';
+
+const logEl = document.getElementById('log');
+const lines = [];
+function log(s, cls) {
+  lines.push(s);
+  logEl.innerHTML = lines.map((x) => x.startsWith('!!') ? `<span class="err">${x.slice(2)}</span>` : x).join('\n');
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+const WORDS = [
+  'abandon','ability','absorb','abstract','academic','accelerate','accept','access','accident','accompany',
+  'accomplish','accurate','achieve','acknowledge','acquire','adapt','adequate','adjust','admire','admit',
+  'adopt','advance','advocate','affect','afford','agency','aggressive','alarm','alter','alternative',
+  'amount','analyze','ancient','announce','annual','anxiety','apparent','appeal','appreciate','approach',
+  'appropriate','approve','argue','arrange','aspect','assess','assign','assist','assume','attach',
+  'attempt','attitude','attract','authority','available','aware','balance','barrier','benefit','brief'
+];
+
+function idbOpen() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open('enword-memory', 1);
+    r.onupgradeneeded = () => {
+      if (!r.result.objectStoreNames.contains('kv')) r.result.createObjectStore('kv');
+    };
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+
+async function run() {
+  try {
+    log('加载 SQLite 引擎…');
+    const SQL = await initSqlJs({ locateFile: (f) => '../vendor/' + f });
+
+    log('加载离线词典…');
+    const dict = await LocalDictionary.load('../data/dict.json.gz');
+    log(`  ${dict.size} 词条`);
+    try { await loadSynonymMap('../data/syn.json.gz'); log('  近义词表已加载'); } catch (e) { log('!!近义词表加载失败'); }
+
+    const svc = new DictionaryService({ local: dict });
+
+    log('构造词表（释义取自词典原文）…');
+    const rows = [];
+    for (const w of WORDS) {
+      const e = dict.lookup(w);
+      if (!e || !e.translation) continue;
+      // 注意字段名是 translation（mergeRows/解析器统一用这个），不是 originalTranslation
+      rows.push({
+        word: w,
+        display: w,
+        translation: e.translation,
+        pos: e.pos,
+        ukIpa: e.phonetic,
+        usIpa: '',
+        example: '',
+        exampleTranslation: '',
+        score: 1,
+        issues: [],
+        keep: true,
+      });
+    }
+    log(`  取到 ${rows.length} 个真实词条`);
+    if (rows.every((r) => !r.translation)) log('  !!全部词条释义为空，检查字段名');
+
+    const db = createDB(SQL);
+    db.migrate();
+
+    const preview = buildImportPreview(db, rows);
+    const imp = commitImport(db, { name: '预览示例词库', sourceType: 'paste', sourceName: 'ECDICT 抽样', rows: preview.rows });
+    log(`  导入完成：新增 ${imp.inserted}，更新 ${imp.updated}`);
+
+    log('跑真实翻译核对…');
+    const ids = db.all('SELECT id FROM words').map((r) => r.id);
+    const res = await checkWords(db, ids, svc, { allowOnline: false });
+    const rep = res.report;
+    log(`  核对：A=${rep.A} B=${rep.B} C=${rep.C} D=${rep.D} E=${rep.E}`);
+
+    log('生成每日任务…');
+    const D1 = addDays(today(), -2);
+    // 现在必须先开始计划才会排新词
+    const plan = startPlan(db, { wordsPerDay: 20, spellingEnabled: true, date: D1 });
+    log(`  计划已开始：每天 ${plan.wordsPerDay} 词，共 ${plan.targetWords} 词`);
+    let answered = 0;
+    for (let d = 0; d < 3; d++) {
+      const date = addDays(D1, d);
+      const day = ensureDailyTasks(db, date);
+      const q = getPendingQueue(db, date);
+      const take = Math.min(12, q.length);       // 故意不学完，留一部分让计划处于"进行中"
+      for (const item of q.slice(0, take)) {
+        const correct = Math.random() > 0.22;
+        recordAnswer(db, {
+          wordId: item.word_id,
+          mode: item.kind === 'new' ? 'new' : (item.kind === 'reinforce' ? 'reinforce' : 'review'),
+          questionType: 'en2cn', isCorrect: correct,
+          userAnswer: correct ? '' : 'x',
+          taskId: item.task_id, date,
+        });
+        answered++;
+      }
+      log(`  ${date}: ${day.newTotal} 个新词任务，作答 ${take}`);
+    }
+    ensureDailyTasks(db, today());
+    log(`  累计作答 ${answered} 题`);
+
+    log('写入 IndexedDB…');
+    const bytes = db.toBinary();
+    const idb = await idbOpen();
+    await new Promise((res2, rej2) => {
+      const tx = idb.transaction('kv', 'readwrite');
+      tx.objectStore('kv').put(bytes, 'db');
+      tx.oncomplete = () => res2();
+      tx.onerror = () => rej2(tx.error);
+    });
+    log(`  写入 ${(bytes.length / 1024).toFixed(0)} KB`);
+    log('');
+    log('完成，可以打开 App 了');
+
+    document.getElementById('link').innerHTML =
+      '<a class="btn" href="../index.html">打开 词忆 App →</a>';
+  } catch (e) {
+    console.error(e);
+    log('!!失败：' + (e && e.message ? e.message : e));
+  }
+}
+
+run();
+</script>
+</body>
+</html>

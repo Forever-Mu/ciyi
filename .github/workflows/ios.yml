@@ -1,0 +1,88 @@
+name: Build unsigned IPA
+
+# 手动触发，或推到 main 时自动跑
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 查看 Xcode 版本
+        run: xcodebuild -version
+
+      - name: 安装 XcodeGen
+        run: brew install xcodegen
+
+      - name: 准备网页资源
+        run: |
+          chmod +x ios/scripts/prepare-www.sh
+          ./ios/scripts/prepare-www.sh
+
+      - name: 生成 Xcode 工程
+        run: |
+          cd ios
+          xcodegen generate
+          ls -la
+
+      - name: 编译（不签名）
+        run: |
+          cd ios
+          xcodebuild \
+            -project CiYi.xcodeproj \
+            -scheme CiYi \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            | xcpretty || xcodebuild \
+            -project CiYi.xcodeproj \
+            -scheme CiYi \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS=""
+
+      - name: 确认产物存在
+        run: |
+          APP="ios/build/Build/Products/Release-iphoneos/CiYi.app"
+          if [ ! -d "$APP" ]; then
+            echo "没有找到 $APP"
+            find ios/build -name "*.app" -maxdepth 6 || true
+            exit 1
+          fi
+          echo "产物："
+          ls -la "$APP"
+          echo "可执行文件信息："
+          file "$APP/CiYi" || true
+
+      - name: 打包成 .ipa
+        run: |
+          APP="ios/build/Build/Products/Release-iphoneos/CiYi.app"
+          rm -rf out
+          mkdir -p out/Payload
+          cp -R "$APP" out/Payload/
+          cd out
+          zip -qry CiYi-unsigned.ipa Payload
+          echo "IPA 大小："
+          ls -la CiYi-unsigned.ipa
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: CiYi-unsigned-ipa
+          path: out/CiYi-unsigned.ipa
+          if-no-files-found: error
