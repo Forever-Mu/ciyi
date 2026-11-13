@@ -8,15 +8,19 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    # 注意：macos-14 对部分账号不可用（job 会在分配 runner 前被 cancel，
+    # 表现为 0 步骤、runner 为空）。macos-15 / macos-latest 可用。
+    runs-on: macos-15
     timeout-minutes: 30
 
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 查看 Xcode 版本
-        run: xcodebuild -version
+      - name: 环境信息
+        run: |
+          xcodebuild -version
+          sw_vers
 
       - name: 安装 XcodeGen
         run: brew install xcodegen
@@ -25,6 +29,12 @@ jobs:
         run: |
           chmod +x ios/scripts/prepare-www.sh
           ./ios/scripts/prepare-www.sh
+
+      - name: 确认 www 目录结构
+        run: |
+          find ios/www -type f | sort
+          echo "-----"
+          du -sh ios/www
 
       - name: 生成 Xcode 工程
         run: |
@@ -45,28 +55,19 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGN_ENTITLEMENTS="" \
-            | xcpretty || xcodebuild \
-            -project CiYi.xcodeproj \
-            -scheme CiYi \
-            -sdk iphoneos \
-            -configuration Release \
-            -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGN_ENTITLEMENTS=""
+            -quiet
 
       - name: 确认产物存在
         run: |
           APP="ios/build/Build/Products/Release-iphoneos/CiYi.app"
           if [ ! -d "$APP" ]; then
-            echo "没有找到 $APP"
-            find ios/build -name "*.app" -maxdepth 6 || true
+            echo "::error::没有找到 $APP"
+            find ios/build -name "*.app" -maxdepth 8 || true
             exit 1
           fi
           echo "产物："
           ls -la "$APP"
-          echo "可执行文件信息："
+          echo "可执行文件："
           file "$APP/CiYi" || true
 
       - name: 打包成 .ipa
