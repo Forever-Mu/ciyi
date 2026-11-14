@@ -18,8 +18,8 @@ targets:
         PRODUCT_NAME: CiYi
         PRODUCT_BUNDLE_IDENTIFIER: com.wordmemory.app
         INFOPLIST_FILE: Resources/Info.plist
-        MARKETING_VERSION: "1.1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        MARKETING_VERSION: "1.1.2"
+        CURRENT_PROJECT_VERSION: "3"
         SWIFT_VERSION: "5.0"
         TARGETED_DEVICE_FAMILY: "1"
         GENERATE_INFOPLIST_FILE: "NO"
