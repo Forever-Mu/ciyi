@@ -5,7 +5,7 @@
  * 所有写操作都在事务里，保证意外退出不丢数据、不留半截状态。
  */
 
-import { normalizeWord, splitSenses, extractPos } from './text.js';
+import { normalizeWord, splitSenses, extractPos, stripListNumber } from './text.js';
 import { mergeRows } from './parse.js';
 import { checkTranslation } from './checker.js';
 import { applyAnswer, initialState, STATE, STATE_LABEL, isStudied } from './srs.js';
@@ -153,12 +153,91 @@ export function commitImport(db, { name, sourceType, sourceName, rows }) {
   });
 }
 
-/** 删除一个词库（单词本身保留，可能还被别的词库引用） */
-export function deleteWordList(db, listId) {
+/**
+ * 删除一个词库
+ *
+ * 之前的实现只删了「词库-单词」关系，单词本身留在 words 表里，
+ * 于是这些词既不在任何词库里、又照样被统计和出题 —— 就是"孤儿单词"。
+ * 现在默认把随之失去归属的单词一并删除（学习记录由外键级联清理）。
+ *
+ * @param {number} listId
+ * @param {{removeOrphans?:boolean}} opts
+ */
+export function deleteWordList(db, listId, opts = {}) {
+  const removeOrphans = opts.removeOrphans !== false;
+
   return db.transaction(() => {
+    const ids = db
+      .all('SELECT word_id FROM word_list_items WHERE list_id=?', [listId])
+      .map((r) => r.word_id);
+
     db.run('DELETE FROM word_list_items WHERE list_id=?', [listId]);
     const r = db.run('DELETE FROM word_lists WHERE id=?', [listId]);
-    return { ok: true, removed: r.changes };
+
+    let removedWords = 0;
+    if (removeOrphans) {
+      for (const id of ids) {
+        const left = db.get('SELECT COUNT(*) AS c FROM word_list_items WHERE word_id=?', [id]);
+        if (!left || left.c === 0) {
+          db.run('DELETE FROM words WHERE id=?', [id]);   // 级联清掉记录/计划/任务
+          removedWords++;
+        }
+      }
+    }
+
+    return { ok: true, removed: r.changes, removedWords };
+  });
+}
+
+/**
+ * 清理孤儿单词：不属于任何词库的单词
+ *
+ * 这些词在界面上不可达，却会计入词库总量、也会被排进学习任务。
+ * 只在确实存在词库时才清理，避免"词库全删光了但又有一堆单词"这种异常状态下误删。
+ *
+ * @returns {{removed:number, remaining:number}}
+ */
+export function pruneOrphanWords(db) {
+  return db.transaction(() => {
+    const before = db.get('SELECT COUNT(*) AS c FROM words').c;
+    const lists = db.get('SELECT COUNT(*) AS c FROM word_lists').c;
+
+    if (lists === 0) {
+      return { removed: 0, remaining: before, skipped: true };
+    }
+
+    const orphans = db.get(
+      `SELECT COUNT(*) AS c FROM words w
+        WHERE NOT EXISTS (SELECT 1 FROM word_list_items i WHERE i.word_id = w.id)`
+    ).c;
+
+    if (orphans > 0) {
+      db.run(`DELETE FROM words
+               WHERE NOT EXISTS (SELECT 1 FROM word_list_items i WHERE i.word_id = words.id)`);
+    }
+
+    const after = db.get('SELECT COUNT(*) AS c FROM words').c;
+    return { removed: before - after, remaining: after };
+  });
+}
+
+/**
+ * 删除全部数据（保留设置）
+ * 调用方必须做二次确认。
+ */
+export function deleteAllData(db) {
+  return db.transaction(() => {
+    const before = db.get('SELECT COUNT(*) AS c FROM words').c;
+    db.run('DELETE FROM daily_tasks');
+    db.run('DELETE FROM learning_records');
+    db.run('DELETE FROM translation_check_records');
+    db.run('DELETE FROM review_schedule');
+    db.run('DELETE FROM word_list_items');
+    db.run('DELETE FROM word_lists');
+    db.run('DELETE FROM words');
+    db.run('DELETE FROM daily_progress');
+    db.run('DELETE FROM study_plan');
+    return { ok: true, removedWords: before };
   });
 }
 
@@ -539,4 +618,38 @@ export function updateWord(db, wordId, patch) {
   params.push(todayStr(), wordId);
   db.run(`UPDATE words SET ${sets.join(',')} WHERE id=?`, params);
   return { ok: true };
+}
+
+/**
+ * 修复历史数据：早期版本会把行首编号一起当成单词存下来
+ * （"10 exceptional" 而不是 "exceptional"）。
+ * 启动时跑一次，把能改的改回来；和目标单词已存在冲突的留给用户处理。
+ *
+ * @returns {{fixed:number, skipped:number}}
+ */
+export function repairNumberedWords(db) {
+  return db.transaction(() => {
+    const candidates = db.all(
+      `SELECT id, word, display_word FROM words WHERE word GLOB '[0-9]*'`
+    );
+    let fixed = 0;
+    let skipped = 0;
+
+    for (const w of candidates) {
+      const cleanWord = normalizeWord(stripListNumber(w.word));
+      if (!cleanWord || cleanWord === w.word) continue;
+      if (!/^[A-Za-z]/.test(cleanWord)) continue;      // 剥完不是英文就别动
+
+      const clash = db.get('SELECT id FROM words WHERE word=? AND id<>?', [cleanWord, w.id]);
+      if (clash) { skipped++; continue; }              // 已存在同名词，不自动合并
+
+      const cleanDisplay = stripListNumber(w.display_word || w.word) || cleanWord;
+      db.run(
+        `UPDATE words SET word=?, display_word=?, updated_at=? WHERE id=?`,
+        [cleanWord, cleanDisplay, todayStr(), w.id]
+      );
+      fixed++;
+    }
+    return { fixed, skipped };
+  });
 }

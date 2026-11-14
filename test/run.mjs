@@ -22,9 +22,12 @@ import {
   startPlan, getActivePlan, planProgress, estimatePlan, countUnlearnedWords,
   cancelPlan, closePlanIfDone,
 } from '../core/scheduler.js';
-import { buildQuestion, gradeAnswer, gradeSpelling, makeRng, activeTypes } from '../core/quiz.js';import {
+import { buildQuestion, gradeAnswer, gradeSpelling, makeRng, activeTypes } from '../core/quiz.js';
+import { stripListNumber } from '../core/text.js';
+import {
   buildImportPreview, commitImport, checkWords, applyCheckDecision,
   recordAnswer, getHomeData, searchWords, getStats, listWordLists, updateWord,
+  repairNumberedWords, deleteWordList, pruneOrphanWords, deleteAllData,
 } from '../core/service.js';
 import { today, addDays, diffDays, toDateStr } from '../core/time.js';
 
@@ -1031,6 +1034,233 @@ section('18. 学习计划');
     if (q && q.type === 'spell') sawSpell = true;
   }
   ok('关闭拼写模式后 40 次出题都没有拼写题', !sawSpell);
+}
+
+/* ================================================================
+ *  19. 行首编号剥离
+ * ================================================================ */
+section('19. 行首编号剥离');
+
+{
+  // stripListNumber 只负责剥前缀，不碰后面的中文释义
+  const stripCases = [
+    ['10 exceptional 杰出的', 'exceptional 杰出的'],
+    ['1. abandon 放弃', 'abandon 放弃'],
+    ['2、 achieve 实现', 'achieve 实现'],
+    ['3) schedule 时间表', 'schedule 时间表'],
+    ['(5) accurate 准确的', 'accurate 准确的'],
+    ['（7） charge 充电', 'charge 充电'],
+    ['[9] absorb 吸收', 'absorb 吸收'],
+    ['① apple 苹果', 'apple 苹果'],
+    ['② ability 能力', 'ability 能力'],
+    ['• abstract 抽象的', 'abstract 抽象的'],
+    ['12: adapt 适应', 'adapt 适应'],
+    ['  15   advance 前进', 'advance 前进'],
+  ];
+  for (const [input, expect] of stripCases) {
+    eq(`剥离编号 "${input}"`, stripListNumber(input), expect);
+  }
+
+  // 不能误伤：数字开头的正常词
+  eq('不误伤 3D', stripListNumber('3D 三维的'), '3D 三维的');
+  eq('不误伤 4K', stripListNumber('4K 超高清'), '4K 超高清');
+  eq('不误伤 24/7', stripListNumber('24/7 全天候'), '24/7 全天候');
+  eq('不误伤普通单词', stripListNumber('exceptional 杰出的'), 'exceptional 杰出的');
+}
+
+{
+  // 整行解析：各种编号格式都要得到干净的单词
+  const parseCases = [
+    ['10 exceptional 杰出的；异常的', 'exceptional', '杰出的；异常的'],
+    ['1. abandon 放弃', 'abandon', '放弃'],
+    ['2、 achieve 实现', 'achieve', '实现'],
+    ['(5) accurate 准确的', 'accurate', '准确的'],
+    ['① apple 苹果', 'apple', '苹果'],
+    ['12) schedule 时间表', 'schedule', '时间表'],
+    ['15 vt. achieve 实现', 'achieve', '实现'],
+    ['3. charge /tʃɑːdʒ/ n. 充电', 'charge', '充电'],
+  ];
+  for (const [line, word, cn] of parseCases) {
+    const rows = parsePastedText(line);
+    ok(`解析 "${line}" 得到一行`, rows.length === 1, rows.length);
+    if (rows.length) {
+      eq(`  → 单词`, rows[0].word, word);
+      eq(`  → 释义`, rows[0].translation, cn);
+    }
+  }
+
+  // 数字开头的正常词不能被剥成空
+  const d3 = parsePastedText('3D 三维的；立体的');
+  eq('3D 保留原样', d3[0].word, '3D');
+
+  // 制表符：序号单独占一列
+  const tab = parsePastedText('10\texceptional\t杰出的');
+  eq('Tab 三列：序号被剥掉', tab[0].word, 'exceptional');
+  eq('Tab 三列：释义正确', tab[0].translation, '杰出的');
+}
+
+{
+  // 历史数据修复：库里已经存成 "10 exceptional" 的要能改回来
+  const db = freshDb();
+  const rows = [
+    { word: '10 exceptional', display: '10 exceptional', translation: '杰出的', pos: [],
+      ukIpa: '', usIpa: '', example: '', exampleTranslation: '', keep: true },
+    { word: '3. abandon', display: '3. abandon', translation: '放弃', pos: [],
+      ukIpa: '', usIpa: '', example: '', exampleTranslation: '', keep: true },
+    { word: 'apple', display: 'apple', translation: '苹果', pos: [],
+      ukIpa: '', usIpa: '', example: '', exampleTranslation: '', keep: true },
+  ];
+  const preview = buildImportPreview(db, rows);
+  commitImport(db, { name: '带编号', sourceType: 'paste', rows: preview.rows });
+
+  eq('导入后确实存了带编号的单词',
+    db.get(`SELECT COUNT(*) AS c FROM words WHERE word GLOB '[0-9]*'`).c, 2);
+
+  const rep = repairNumberedWords(db);
+  eq('修复了 2 个', rep.fixed, 2);
+
+  const words = db.all('SELECT word FROM words ORDER BY word').map((r) => r.word);
+  eq('修复后的单词表', words, ['abandon', 'apple', 'exceptional']);
+  eq('不再有数字开头的词',
+    db.get(`SELECT COUNT(*) AS c FROM words WHERE word GLOB '[0-9]*'`).c, 0);
+  eq('释义没被破坏',
+    db.get('SELECT original_translation FROM words WHERE word=?', ['exceptional']).original_translation,
+    '杰出的');
+
+  // 重复执行应当无副作用
+  const rep2 = repairNumberedWords(db);
+  eq('再跑一次不再改动', rep2.fixed, 0);
+}
+
+/* ================================================================
+ *  20. 删除词库与全部删除
+ * ================================================================ */
+section('20. 删除与清理');
+
+{
+  // 造一个带完整学习痕迹的词库
+  const db = freshDb();
+  const mk = (name, words) => {
+    const rows = words.map((w, i) => ({
+      word: w, display: w, translation: '释义' + i, pos: [],
+      ukIpa: '', usIpa: '', example: '', exampleTranslation: '', keep: true,
+    }));
+    const p = buildImportPreview(db, rows);
+    return commitImport(db, { name, sourceType: 'paste', rows: p.rows });
+  };
+
+  const A = mk('词库A', ['apple', 'banana', 'cherry']);
+  const B = mk('词库B', ['dog', 'egg']);
+  eq('两个库共 5 个词', db.get('SELECT COUNT(*) AS c FROM words').c, 5);
+  eq('词库数 2', listWordLists(db).length, 2);
+
+  // 先学几个词，制造学习记录
+  startPlan(db, { wordsPerDay: 50, spellingEnabled: true, date: D1 });
+  ensureDailyTasks(db, D1);
+  for (const it of getPendingQueue(db, D1).slice(0, 3)) {
+    recordAnswer(db, { wordId: it.word_id, mode: 'new', questionType: 'en2cn',
+      isCorrect: true, taskId: it.task_id, date: D1 });
+  }
+  ok('学习记录已产生', db.get('SELECT COUNT(*) AS c FROM learning_records').c > 0);
+
+  // ---------- 删除词库A：它的词应一并消失 ----------
+  const delA = deleteWordList(db, A.listId);
+  eq('词库A 移除了 3 个单词', delA.removedWords, 3);
+  eq('删除后总数 2', db.get('SELECT COUNT(*) AS c FROM words').c, 2);
+  eq('统计同步更新', getStats(db).totalWords, 2);
+  eq('词库A 的单词彻底没了',
+    db.get(`SELECT COUNT(*) AS c FROM words WHERE word IN ('apple','banana','cherry')`).c, 0);
+  eq('词库A 的学习记录被级联清除',
+    db.get(`SELECT COUNT(*) AS c FROM learning_records WHERE word_id NOT IN (SELECT id FROM words)`).c, 0);
+
+  // ---------- 共享单词不误删 ----------
+  const C = mk('共享1', ['shared', 'only1']);
+  const D = mk('共享2', ['shared', 'only2']);
+  const beforeShared = db.get('SELECT COUNT(*) AS c FROM words').c;
+  const delC = deleteWordList(db, C.listId);
+  eq('只删掉属于共享1 独有的 1 个词', delC.removedWords, 1);
+  eq('总数只少 1', db.get('SELECT COUNT(*) AS c FROM words').c, beforeShared - 1);
+  ok('共享词还在', !!db.get('SELECT id FROM words WHERE word=?', ['shared']));
+  ok('共享2 独有的词还在', !!db.get('SELECT id FROM words WHERE word=?', ['only2']));
+
+  // ---------- 孤儿单词清理（修复历史数据）----------
+  const db2 = freshDb();
+  const rows2 = ['a1', 'a2', 'b1'].map((w, i) => ({
+    word: w, display: w, translation: '义' + i, pos: [],
+    ukIpa: '', usIpa: '', example: '', exampleTranslation: '', keep: true,
+  }));
+  const p2 = buildImportPreview(db2, rows2);
+  const list2 = commitImport(db2, { name: '库', sourceType: 'paste', rows: p2.rows });
+  // 手动制造孤儿：只删关系，不删单词（模拟旧版本的行为）
+  db2.run('DELETE FROM word_list_items WHERE word_id IN (SELECT id FROM words WHERE word IN (?,?))',
+    ['a1', 'a2']);
+  eq('制造出 3 个单词 1 个关系', db2.get('SELECT COUNT(*) AS c FROM words').c, 3);
+  eq('统计里仍算 3 个（旧 bug）', getStats(db2).totalWords, 3);
+
+  const pr = pruneOrphanWords(db2);
+  eq('清理掉 2 个孤儿', pr.removed, 2);
+  eq('剩 1 个', pr.remaining, 1);
+  eq('统计随之变为 1', getStats(db2).totalWords, 1);
+  ok('有归属的词没被误删', !!db2.get('SELECT id FROM words WHERE word=?', ['b1']));
+  eq('再跑一次无副作用', pruneOrphanWords(db2).removed, 0);
+
+  // 词库全删光时不触发清理（避免异常状态下误删）
+  const db3 = freshDb();
+  const rows3 = [{ word: 'x', display: 'x', translation: '叉', pos: [], ukIpa: '',
+    usIpa: '', example: '', exampleTranslation: '', keep: true }];
+  const p3 = buildImportPreview(db3, rows3);
+  commitImport(db3, { name: 'l', sourceType: 'paste', rows: p3.rows });
+  db3.run('DELETE FROM word_list_items');   // 只删关系，词库还在
+  db3.run('DELETE FROM word_lists');        // 词库也没了 → 0 个词库
+  const pr3 = pruneOrphanWords(db3);
+  eq('没有词库时不自动清空', pr3.removed, 0);
+  eq('单词保留', db3.get('SELECT COUNT(*) AS c FROM words').c, 1);
+}
+
+{
+  // ---------- 全部删除 ----------
+  const db = freshDb();
+  const rows = ['one', 'two', 'three'].map((w, i) => ({
+    word: w, display: w, translation: '义' + i, pos: [],
+    ukIpa: '', usIpa: '', example: '', exampleTranslation: '', keep: true,
+  }));
+  const p = buildImportPreview(db, rows);
+  commitImport(db, { name: '全删测试', sourceType: 'paste', rows: p.rows });
+  startPlan(db, { wordsPerDay: 2, spellingEnabled: true, date: D1 });
+  ensureDailyTasks(db, D1);
+  const q = getPendingQueue(db, D1);
+  if (q.length) {
+    recordAnswer(db, { wordId: q[0].word_id, mode: 'new', questionType: 'en2cn',
+      isCorrect: true, taskId: q[0].task_id, date: D1 });
+  }
+  setSetting(db, 'theme', 'dark');
+
+  ok('删除前有数据',
+    db.get('SELECT COUNT(*) AS c FROM words').c === 3 &&
+    db.get('SELECT COUNT(*) AS c FROM word_lists').c === 1);
+
+  const r = deleteAllData(db);
+  eq('返回删除的单词数', r.removedWords, 3);
+
+  eq('单词清空', db.get('SELECT COUNT(*) AS c FROM words').c, 0);
+  eq('词库清空', db.get('SELECT COUNT(*) AS c FROM word_lists').c, 0);
+  eq('关联清空', db.get('SELECT COUNT(*) AS c FROM word_list_items').c, 0);
+  eq('学习记录清空', db.get('SELECT COUNT(*) AS c FROM learning_records').c, 0);
+  eq('记忆状态清空', db.get('SELECT COUNT(*) AS c FROM review_schedule').c, 0);
+  eq('每日任务清空', db.get('SELECT COUNT(*) AS c FROM daily_tasks').c, 0);
+  eq('每日进度清空', db.get('SELECT COUNT(*) AS c FROM daily_progress').c, 0);
+  eq('学习计划清空', db.get('SELECT COUNT(*) AS c FROM study_plan').c, 0);
+  eq('核对历史清空', db.get('SELECT COUNT(*) AS c FROM translation_check_records').c, 0);
+  eq('设置保留（主题还在）', getSettings(db).theme, 'dark');
+
+  const st = getStats(db);
+  eq('统计归零', [st.totalWords, st.studied, st.totalAnswers], [0, 0, 0]);
+  eq('清空后没有进行中的计划', getActivePlan(db), null);
+
+  // 清空后还能重新导入使用
+  const p2 = buildImportPreview(db, rows);
+  commitImport(db, { name: '重来', sourceType: 'paste', rows: p2.rows });
+  eq('清空后可重新导入', db.get('SELECT COUNT(*) AS c FROM words').c, 3);
 }
 
 /* ================================================================

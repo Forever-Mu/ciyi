@@ -449,6 +449,7 @@ html[data-theme="light"] .ico-moon { display: none; }
 html[data-theme="dark"] .ico-sun { display: none; }
 
 .hidden { display: none !important; }
+.divider { height: 1px; background: var(--border); margin: 2px 0; }
 .mono { font-family: var(--mono); }
 .nowrap { white-space: nowrap; }
 .muted { color: var(--text-3); }

@@ -13,6 +13,7 @@
 import {
   normalizeWord, isEnglishWord, hasChinese, extractPos, extractIpa,
   cleanIpa, cleanTranslation, stripPosPrefix, splitSenses, cnSimilarity,
+  stripListNumber,
 } from './text.js';
 
 /* ================================================================
@@ -193,7 +194,11 @@ function splitChinesePart(rest) {
  * 处理顺序：找第一个中文字符作为分界，左边是英文区，右边是中文区
  */
 export function parseLine(line) {
-  const raw = String(line || '').replace(/\u00a0/g, ' ').trim();
+  const original = String(line || '').replace(/\u00a0/g, ' ').trim();
+  if (!original) return null;
+
+  // 先剥掉行首编号（"10 exceptional ..." → "exceptional ..."）
+  const raw = stripListNumber(original);
   if (!raw) return null;
 
   // 纯分隔符模式：形如 "apple\t苹果" 或 "apple,苹果" 或 "apple:苹果"
@@ -230,7 +235,8 @@ export function parseLine(line) {
   const en = splitEnglishPart(wordPart);
   const cn = splitChinesePart(cnPart);
 
-  const word = en.word.trim();
+  // 双保险：编号可能夹在英文段里（如 "10\texceptional"）
+  const word = stripListNumber(en.word).trim();
   const issues = [];
   let score = 1;
 
@@ -373,7 +379,8 @@ export function rowsFromTable(tableRows, mapping) {
 
     const pick = (i) => (i >= 0 && i < cells.length ? (cells[i] || '').trim() : '');
 
-    const wordCell = pick(roles.word);
+    // 单元格里也可能带编号（"1. exceptional" / "10 exceptional"）
+    const wordCell = stripListNumber(pick(roles.word));
     if (!wordCell) return;
 
     // 一个单元格里可能塞了多个词，用分隔符再切一次

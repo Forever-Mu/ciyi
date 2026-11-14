@@ -12,7 +12,8 @@ import { parsePastedText, parseDocxBuffer, detectColumnRoles, rowsFromTable } fr
 import {
   buildImportPreview, commitImport, checkWords, applyCheckDecision,
   recordAnswer, getHomeData, searchWords, getStats, listWordLists,
-  deleteWordList, deleteWord, updateWord,
+  deleteWordList, deleteWord, updateWord, repairNumberedWords,
+  pruneOrphanWords, deleteAllData,
 } from '../core/service.js';
 import {
   ensureDailyTasks, getPendingQueue, summarizeDay, getSettings, setSetting,
@@ -41,12 +42,15 @@ const S = {
   lastCard: null,
 };
 
+/** 启动时清理掉的孤儿单词数量，用于给用户一个提示 */
+let orphanNotice = 0;
+
 const ROUTES = {
   home: { title: '今日', sub: () => S.date },
   study: { title: '学习', sub: () => '新词与复习' },
   library: { title: '词库', sub: () => '' },
   stats: { title: '统计', sub: () => '真实数据，实时计算' },
-  settings: { title: '设置', sub: () => 'v1.1.0' },
+  settings: { title: '设置', sub: () => 'v1.1.2' },
   plan: { title: '学习计划', sub: () => '定好节奏，之后每天自动安排' },
   check: { title: '翻译核对报告', sub: () => '' },
   import: { title: '导入单词', sub: () => '' },
@@ -1476,19 +1480,63 @@ function screenSettings() {
         onclick: async () => {
           const ok = await confirmDialog({
             title: '删除词库？',
-            message: `将移除词库「${l.name}」的导入记录。`,
-            detail: '单词本身及其学习记录会保留（可能还被其它词库引用）。',
-            confirmText: '删除', danger: true,
+            message: `将删除词库「${l.name}」，并移除其中只属于这个词库的 ${l.actual_count} 个单词。`,
+            detail: '这些单词的学习记录会一并清除。若某个单词还在其它词库里，则会保留。此操作不可撤销。',
+            confirmText: '删除词库',
+            danger: true,
           });
           if (!ok) return;
-          deleteWordList(S.db, l.id);
+          const r = deleteWordList(S.db, l.id);
           scheduleSave();
-          toast('已删除词库', 'ok');
+          toast(
+            r.removedWords > 0
+              ? `已删除词库，同时移除 ${r.removedWords} 个单词`
+              : '已删除词库（其单词仍被其它词库引用，已保留）',
+            'ok', 2800
+          );
           render();
         },
       }, icon('trash', 15))
     ));
   }
+
+  const totalWordsNow = S.db.get('SELECT COUNT(*) AS c FROM words').c;
+
+  const wipeBtn = h('button', {
+    class: 'btn btn-danger btn-block',
+    disabled: totalWordsNow === 0,
+    onclick: async () => {
+      if (totalWordsNow === 0) return;
+
+      // 第一次确认
+      const first = await confirmDialog({
+        title: '删除全部数据？',
+        message: `将永久删除 ${totalWordsNow} 个单词、全部词库、学习记录、复习计划与统计数据。`,
+        detail: '此操作不可撤销。建议先点上面的「导出数据库备份」存一份。',
+        confirmText: '继续',
+        danger: true,
+      });
+      if (!first) return;
+
+      // 第二次确认：必须手打文字
+      const second = await confirmDialog({
+        title: '再次确认',
+        message: '最后一步。请手动输入「删除全部」以确认。',
+        confirmText: '彻底删除',
+        danger: true,
+        requireText: '删除全部',
+      });
+      if (!second) return;
+
+      const r = deleteAllData(S.db);
+      S.session = null;
+      S.checkResult = null;
+      scheduleSave();
+      toast(`已删除全部数据（${r.removedWords} 个单词）`, 'ok', 3000);
+      navigate('home');
+      render();
+    },
+  }, icon('trash', 18), '删除全部数据');
 
   const exportBtn = h('button', {
     class: 'btn btn-outline btn-block',
@@ -1562,12 +1610,16 @@ function screenSettings() {
       h('div', { class: 'card-head' }, h('h3', { text: '数据' })),
       h('div', { class: 'card-body stack' },
         exportBtn,
-        h('div', { class: 'hint-text', text: '所有数据保存在本机 SQLite 数据库中，不上传任何服务器。' }))),
+        h('div', { class: 'hint-text', text: '所有数据保存在本机 SQLite 数据库中，不上传任何服务器。' }),
+        h('div', { class: 'divider' }),
+        wipeBtn,
+        h('div', { class: 'hint-text',
+          text: `删除后本机将清空全部 ${totalWordsNow} 个单词与学习记录，需要二次确认。` }))),
 
     h('div', { class: 'card' },
       h('div', { class: 'card-head' }, h('h3', { text: '关于' })),
       h('div', { class: 'card-body stack', style: 'gap:8px' },
-        h('div', { class: 'hint-text', text: '词忆 v1.0.0 · 纯本地离线背单词' }),
+        h('div', { class: 'hint-text', text: '词忆 v1.1.2 · 纯本地离线背单词' }),
         h('div', { class: 'hint-text', text: '词典数据来源：ECDICT（MIT 开源英汉词典）' }),
         h('div', { class: 'hint-text', text: '在线补充：dictionaryapi.dev' })))
   );
@@ -1619,6 +1671,26 @@ async function boot() {
     applyTheme();
 
     step(90, '准备今日任务…');
+    // 修复历史数据：早期版本会把行首序号当成单词的一部分（"10 exceptional"）
+    try {
+      const rep = repairNumberedWords(S.db);
+      if (rep.fixed > 0) {
+        console.log(`[词忆] 已修复 ${rep.fixed} 个带编号的单词`);
+      }
+    } catch (e) {
+      console.warn('[词忆] 编号修复失败', e);
+    }
+
+    // 清理孤儿单词：不属于任何词库、却还在统计和出题里的历史遗留
+    try {
+      const pr = pruneOrphanWords(S.db);
+      if (pr.removed > 0) {
+        console.log(`[词忆] 已清理 ${pr.removed} 个无归属词库的单词`);
+        orphanNotice = pr.removed;
+      }
+    } catch (e) {
+      console.warn('[词忆] 孤儿单词清理失败', e);
+    }
     ensureDailyTasks(S.db, S.date);
     closePlanIfDone(S.db, S.date);
 
@@ -1640,6 +1712,9 @@ async function boot() {
     window.addEventListener('hashchange', () => navigate(routeFromHash(), true));
 
     navigate(routeFromHash(), true);
+    if (orphanNotice > 0) {
+      toast(`已清理 ${orphanNotice} 个不属于任何词库的残留单词`, 'info', 3600);
+    }
     console.log(`[词忆] 启动完成 ${Date.now() - t0}ms，词典 ${S.dict.size} 词`);
   } catch (e) {
     console.error(e);

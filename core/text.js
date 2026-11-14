@@ -71,6 +71,45 @@ export function isEnglishWord(s) {
   return /^[A-Za-z][A-Za-z'’\- ]*$/.test(t);
 }
 
+/* ---------------------------------------------------------------
+ * 去掉行首/单元格开头的编号
+ *
+ * 单词表几乎都是这样写的：
+ *     10 exceptional 杰出的
+ *     3. abandon 放弃
+ *     (5) accurate 准确的
+ *     ① achieve 实现
+ * 如果不剥掉，单词会变成 "10 exceptional"，导入后彻底没法用。
+ *
+ * 所有「数字 + 分隔符」的规则都加了 (?=[A-Za-z]) 前瞻：
+ * 只在前缀后面确实跟着英文字母时才剥，避免误伤 "3D"、"4K"、"24/7" 这类词。
+ * ------------------------------------------------------------- */
+const LIST_PREFIXES = [
+  // ① ② ⑴ ⑵ ⒈ ⒉ 这类圈号/带括号数字
+  /^[\u2460-\u24FF\u2776-\u2793]+\s*/,
+  // 项目符号（不含连字符，避免误伤 well-known 之类）
+  /^[•·▪◦※*]\s+/,
+  // (1) [1] （1） 【1】 <1>
+  /^[(\[（【<]\s*\d{1,4}\s*[)\]）】>]\s*/,
+  // 1. / 1、 / 1) / 1: / 1，
+  /^\d{1,4}\s*[.)、,，:：]\s*(?=[A-Za-z])/,
+  // 纯数字 + 空格："10 exceptional"（注意 "3D" 没有空格，不会被剥）
+  /^\d{1,4}\s+(?=[A-Za-z])/,
+];
+
+/** 剥掉行首编号，返回干净的文本 */
+export function stripListNumber(s) {
+  let t = String(s == null ? '' : s).replace(/\u00a0/g, ' ').trim();
+  // 依次套用，处理 "1. ②" 这种叠加情况；最多跑两轮，避免死循环
+  for (let round = 0; round < 2; round++) {
+    const before = t;
+    for (const re of LIST_PREFIXES) t = t.replace(re, '');
+    t = t.trim();
+    if (t === before) break;
+  }
+  return t;
+}
+
 export function hasChinese(s) {
   return CJK.test(String(s || ''));
 }
