@@ -14,6 +14,7 @@ import {
   recordAnswer, getHomeData, searchWords, getStats, listWordLists,
   deleteWordList, deleteWord, updateWord, repairNumberedWords,
   pruneOrphanWords, deleteAllData,
+  fetchPhonetics, countMissingPhonetics,
 } from '../core/service.js';
 import {
   ensureDailyTasks, getPendingQueue, summarizeDay, getSettings, setSetting,
@@ -50,7 +51,7 @@ const ROUTES = {
   study: { title: '学习', sub: () => '新词与复习' },
   library: { title: '词库', sub: () => '' },
   stats: { title: '统计', sub: () => '真实数据，实时计算' },
-  settings: { title: '设置', sub: () => 'v1.1.2' },
+  settings: { title: '设置', sub: () => 'v1.1.3' },
   plan: { title: '学习计划', sub: () => '定好节奏，之后每天自动安排' },
   check: { title: '翻译核对报告', sub: () => '' },
   import: { title: '导入单词', sub: () => '' },
@@ -721,23 +722,46 @@ function showPreview(rawRows, sourceType, listName) {
   renderList();
   updateCount();
 
+  // ---- 自动获取音标 ----
+  const phoneticToggle = h('input', { type: 'checkbox' });
+  phoneticToggle.checked = S.settings.auto_phonetic !== '0';
+  const phoneticBox = h('label', { class: 'row top', style: 'cursor:pointer' },
+    phoneticToggle,
+    h('div', {},
+      h('div', { style: 'font-size:14px;font-weight:600', text: '自动获取音标' }),
+      h('div', { class: 'hint-text', style: 'margin-top:2px',
+        text: '导入后用内置离线词典补全音标，联网时再补英式/美式差异。关掉也可以之后在设置里补。' })));
+
   bodyEl.appendChild(stats);
+  bodyEl.appendChild(h('div', { class: 'card' }, h('div', { class: 'card-body' }, phoneticBox)));
   bodyEl.appendChild(h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h3', { text: '导入预览' }), countEl), list));
 
   const importBtn = h('button', {
     class: 'btn btn-primary',
     disabled: state.length === 0,
-    onclick: () => {
+    onclick: async () => {
       const keep = state.filter((r) => r.keep !== false);
       if (!keep.length) return;
+      const wantPhonetic = phoneticToggle.checked;
+      // 记住选择，下次导入沿用
+      setSetting(S.db, 'auto_phonetic', wantPhonetic ? '1' : '0');
+      S.settings.auto_phonetic = wantPhonetic ? '1' : '0';
+
       const res = commitImport(S.db, { name: listName, sourceType, rows: keep });
       scheduleSave();
       m.close();
       toast(`导入完成：新增 ${res.inserted}，更新 ${res.updated}`, 'ok', 2600);
       navigate('home');
-      setTimeout(() => {
-        if (res.inserted + res.updated > 0) askCheck(res.listId);
-      }, 400);
+
+      if (res.inserted + res.updated > 0) {
+        if (wantPhonetic) {
+          const ids = S.db
+            .all('SELECT word_id FROM word_list_items WHERE list_id=?', [res.listId])
+            .map((r) => r.word_id);
+          try { await runPhoneticFetch(ids, { quietIfNone: true }); } catch (e) { console.warn(e); }
+        }
+        setTimeout(() => askCheck(res.listId), 300);
+      }
     },
   }, '确认导入');
   updateCount.call ? null : null;
@@ -802,6 +826,66 @@ async function runTranslationCheck() {
   S.checkResult = { results, report };
   toast(`核对完成：正确 ${report.A}，需关注 ${report.needsReview}`, 'ok', 3000);
   navigate('check');
+}
+
+/* ================================================================
+ *  音标获取
+ * ================================================================ */
+/**
+ * 为一批单词补齐音标
+ * @param {number[]} wordIds  空 = 全库
+ * @param {{quietIfNone?:boolean}} opts
+ */
+async function runPhoneticFetch(wordIds, opts = {}) {
+  const ids = Array.isArray(wordIds) && wordIds.length
+    ? wordIds
+    : S.db.all('SELECT id FROM words ORDER BY id').map((r) => r.id);
+
+  const missing = countMissingPhonetics(S.db, ids);
+  if (missing === 0) {
+    if (!opts.quietIfNone) toast('这些单词都已经有音标了', 'info');
+    return null;
+  }
+
+  const total = missing;
+  const bar = h('i', { style: 'width:0%' });
+  const label = h('div', { class: 'tiny muted', text: `0 / ${total}` });
+  const m = sheet({
+    title: '正在获取音标',
+    body: h('div', { class: 'stack', style: 'padding:8px 0' },
+      h('div', { class: 'progress' }, bar),
+      label,
+      h('div', { class: 'hint-text',
+        text: '先用内置离线词典（瞬间完成），联网时再补英式/美式差异。' })),
+  });
+
+  let done = 0;
+  let res;
+  try {
+    res = await fetchPhonetics(S.db, ids, S.dictService, {
+      allowOnline: S.settings.dict_online_enabled !== '0',
+      onProgress: () => {
+        done++;
+        const pct = total ? Math.min(100, Math.round((done / total) * 100)) : 100;
+        bar.style.width = pct + '%';
+        label.textContent = `${Math.min(done, total)} / ${total}`;
+      },
+    });
+  } finally {
+    m.close();
+  }
+
+  scheduleSave();
+  const parts = [];
+  if (res.fromOffline) parts.push(`离线 ${res.fromOffline}`);
+  if (res.fromOnline) parts.push(`在线 ${res.fromOnline}`);
+  if (res.stillMissing) parts.push(`仍缺 ${res.stillMissing}`);
+  toast(
+    parts.length ? `音标补齐：${parts.join('，')}` : '没有需要补的单词',
+    res.stillMissing > 0 ? 'warn' : 'ok', 3200
+  );
+  render();
+  return res;
 }
 
 const STATUS_META = {
@@ -1428,6 +1512,7 @@ function renderTrend(trend) {
 function screenSettings() {
   const settings = getSettings(S.db);
   const lists = listWordLists(S.db);
+  const missingPhonetic = countMissingPhonetics(S.db);
 
   const targetInput = h('input', {
     class: 'input', type: 'number', min: '1', max: '200', value: settings.daily_new_target || '50',
@@ -1600,7 +1685,16 @@ function screenSettings() {
             h('div', { class: 'hint-text', style: 'margin-top:2px',
               text: '使用 dictionaryapi.dev（免费、无需密钥）。关闭后仅用本机离线词库，完全断网也能核对。' }))),
         h('div', { class: 'notice info' }, icon('info', 16),
-          h('div', { text: `离线词库 ${S.dict ? S.dict.size.toLocaleString() : 0} 个词条，已内置在 App 内。` })))),
+          h('div', { text: `离线词库 ${S.dict ? S.dict.size.toLocaleString() : 0} 个词条，已内置在 App 内。` })),
+        h('div', { class: 'divider' }),
+        h('button', {
+          class: 'btn btn-block',
+          disabled: missingPhonetic === 0,
+          onclick: () => runPhoneticFetch([]),
+        }, icon('info', 18),
+          missingPhonetic > 0 ? `为 ${missingPhonetic} 个单词获取音标` : '所有单词都已有音标'),
+        h('div', { class: 'hint-text',
+          text: '先查内置离线词典，联网时再补英式/美式差异。已导入的词库随时可以补。' }))),
 
     h('div', { class: 'card' },
       h('div', { class: 'card-head' }, h('h3', { text: '我的词库' }), h('span', { class: 'hint', text: `${lists.length} 个` })),
@@ -1619,7 +1713,7 @@ function screenSettings() {
     h('div', { class: 'card' },
       h('div', { class: 'card-head' }, h('h3', { text: '关于' })),
       h('div', { class: 'card-body stack', style: 'gap:8px' },
-        h('div', { class: 'hint-text', text: '词忆 v1.1.2 · 纯本地离线背单词' }),
+        h('div', { class: 'hint-text', text: '词忆 v1.1.3 · 纯本地离线背单词' }),
         h('div', { class: 'hint-text', text: '词典数据来源：ECDICT（MIT 开源英汉词典）' }),
         h('div', { class: 'hint-text', text: '在线补充：dictionaryapi.dev' })))
   );

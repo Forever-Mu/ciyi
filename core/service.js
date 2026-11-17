@@ -5,7 +5,7 @@
  * 所有写操作都在事务里，保证意外退出不丢数据、不留半截状态。
  */
 
-import { normalizeWord, splitSenses, extractPos, stripListNumber } from './text.js';
+import { normalizeWord, splitSenses, extractPos, stripListNumber, cleanIpa } from './text.js';
 import { mergeRows } from './parse.js';
 import { checkTranslation } from './checker.js';
 import { applyAnswer, initialState, STATE, STATE_LABEL, isStudied } from './srs.js';
@@ -324,6 +324,104 @@ export async function checkWords(db, wordIds, dictService, opts = {}) {
   }
 
   return { results, report };
+}
+
+/** 统计还缺音标的单词数 */
+export function countMissingPhonetics(db, wordIds) {
+  if (Array.isArray(wordIds) && wordIds.length) {
+    const ph = wordIds.map(() => '?').join(',');
+    return db.get(
+      `SELECT COUNT(*) AS c FROM words
+        WHERE id IN (${ph})
+          AND COALESCE(TRIM(uk_ipa), '') = ''
+          AND COALESCE(TRIM(us_ipa), '') = ''`,
+      wordIds
+    ).c;
+  }
+  return db.get(
+    `SELECT COUNT(*) AS c FROM words
+      WHERE COALESCE(TRIM(uk_ipa), '') = ''
+        AND COALESCE(TRIM(us_ipa), '') = ''`
+  ).c;
+}
+
+/**
+ * 为单词补齐音标
+ *
+ * 顺序：先用内置离线词典（内存查表，瞬间完成），
+ * 还缺的再问在线词典（可关闭）。已经两边都有的直接跳过，不重复请求。
+ *
+ * @param {object} db
+ * @param {number[]} wordIds  空数组 = 全库
+ * @param {object} dictService DictionaryService
+ * @param {{allowOnline?:boolean, onProgress?:Function}} opts
+ * @returns {Promise<{total:number, fromOffline:number, fromOnline:number, stillMissing:number}>}
+ */
+export async function fetchPhonetics(db, wordIds, dictService, opts = {}) {
+  const allowOnline = opts.allowOnline !== false && !!(dictService && dictService.remote);
+  const onProgress = typeof opts.onProgress === 'function' ? opts.onProgress : null;
+
+  const ids = Array.isArray(wordIds) && wordIds.length
+    ? wordIds
+    : db.all('SELECT id FROM words ORDER BY id').map((r) => r.id);
+
+  const result = { total: 0, fromOffline: 0, fromOnline: 0, stillMissing: 0 };
+
+  for (const id of ids) {
+    const w = db.get('SELECT id, word, uk_ipa, us_ipa FROM words WHERE id=?', [id]);
+    if (!w) continue;
+
+    let uk = String(w.uk_ipa || '').trim();
+    let us = String(w.us_ipa || '').trim();
+    if (uk && us) continue;                 // 已经有了，不动
+
+    result.total++;
+    let gotOffline = false;
+
+    // ---- 1) 离线词典（快，无网络依赖）----
+    if (!uk || !us) {
+      let loc = null;
+      try {
+        loc = dictService && dictService.local ? dictService.local.lookup(w.word) : null;
+      } catch (e) { loc = null; }
+      if (loc && loc.phonetic) {
+        const ipa = cleanIpa(loc.phonetic);
+        if (ipa) {
+          if (!uk) { uk = ipa; gotOffline = true; }
+          if (!us) { us = ipa; gotOffline = true; }
+        }
+      }
+    }
+    if (gotOffline) result.fromOffline++;
+
+    // ---- 2) 在线补英/美差异（可选）----
+    const needOnline = (!uk || !us) && allowOnline;
+    if (needOnline) {
+      let r = null;
+      try {
+        r = await dictService.remote.lookup(w.word);
+      } catch (e) { r = null; }
+      if (r && r.ok) {
+        let got = false;
+        if (!uk && r.ukIpa) { uk = r.ukIpa; got = true; }
+        if (!us && r.usIpa) { us = r.usIpa; got = true; }
+        if (got) result.fromOnline++;
+      }
+    }
+
+    if (uk || us) {
+      db.run(
+        'UPDATE words SET uk_ipa=?, us_ipa=?, updated_at=? WHERE id=?',
+        [uk, us, todayStr(), id]
+      );
+    } else {
+      result.stillMissing++;
+    }
+
+    if (onProgress) onProgress(result);
+  }
+
+  return result;
 }
 
 /**

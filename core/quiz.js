@@ -70,6 +70,17 @@ export function translationOf(word) {
   return word.confirmed_translation || word.original_translation || word.suggested_translation || '';
 }
 
+/**
+ * 音标展示文本：英式、美式不同就都显示，相同就只显示一个
+ * 返回格式如 "/əˈbændən/  /əˈbændən/"
+ */
+export function phoneticOf(word) {
+  const uk = String((word && word.uk_ipa) || '').trim();
+  const us = String((word && word.us_ipa) || '').trim();
+  if (uk && us && uk !== us) return uk + '   ' + us;
+  return uk || us || '';
+}
+
 /** 取义项里最短的一个作为选项标签，避免选项过长 */
 function shortestSense(translation) {
   const senses = splitSenses(translation);
@@ -186,7 +197,7 @@ export function buildQuestion(word, pool, opts = {}) {
     type,
     word,
     prompt: display,
-    promptSub: word.uk_ipa || '',
+    promptSub: phoneticOf(word),
     promptKind: 'en',
     options,
     answerIndex: options.indexOf(answer),

@@ -22,12 +22,13 @@ import {
   startPlan, getActivePlan, planProgress, estimatePlan, countUnlearnedWords,
   cancelPlan, closePlanIfDone,
 } from '../core/scheduler.js';
-import { buildQuestion, gradeAnswer, gradeSpelling, makeRng, activeTypes } from '../core/quiz.js';
+import { buildQuestion, gradeAnswer, gradeSpelling, makeRng, activeTypes, phoneticOf } from '../core/quiz.js';
 import { stripListNumber } from '../core/text.js';
 import {
   buildImportPreview, commitImport, checkWords, applyCheckDecision,
   recordAnswer, getHomeData, searchWords, getStats, listWordLists, updateWord,
   repairNumberedWords, deleteWordList, pruneOrphanWords, deleteAllData,
+  fetchPhonetics, countMissingPhonetics,
 } from '../core/service.js';
 import { today, addDays, diffDays, toDateStr } from '../core/time.js';
 
@@ -1261,6 +1262,92 @@ section('20. 删除与清理');
   const p2 = buildImportPreview(db, rows);
   commitImport(db, { name: '重来', sourceType: 'paste', rows: p2.rows });
   eq('清空后可重新导入', db.get('SELECT COUNT(*) AS c FROM words').c, 3);
+}
+
+/* ================================================================
+ *  21. 音标获取与展示
+ * ================================================================ */
+section('21. 音标获取与展示');
+
+{
+  const db = freshDb();
+  const words = ['abandon', 'accurate', 'achieve', 'schedule', 'apple', 'zzzznotaword'];
+  const rows = words.map((w, i) => ({
+    word: w, display: w, translation: '释义' + i, pos: [],
+    ukIpa: '', usIpa: '', example: '', exampleTranslation: '', keep: true,
+  }));
+  const p = buildImportPreview(db, rows);
+  commitImport(db, { name: '音标测试', sourceType: 'paste', rows: p.rows });
+
+  eq('导入后 6 个都没音标', countMissingPhonetics(db), 6);
+
+  // ---- 离线补齐（offlineService 只挂了本地词典）----
+  const r = await fetchPhonetics(db, [], offlineService, { allowOnline: false });
+  eq('处理了 6 个', r.total, 6);
+  eq('离线补上 5 个', r.fromOffline, 5);
+  eq('1 个查不到', r.stillMissing, 1);
+  eq('补完后仍缺 1 个', countMissingPhonetics(db), 1);
+
+  const ab = db.get('SELECT * FROM words WHERE word=?', ['abandon']);
+  ok('abandon 有音标了', !!ab.uk_ipa, ab.uk_ipa);
+  ok('音标带首尾斜杠', ab.uk_ipa.startsWith('/') && ab.uk_ipa.endsWith('/'), ab.uk_ipa);
+  ok('音标内容合理', /^\/.+\/$/.test(ab.uk_ipa) && ab.uk_ipa.length > 4, ab.uk_ipa);
+
+  const miss = db.get('SELECT * FROM words WHERE word=?', ['zzzznotaword']);
+  eq('查不到的词音标为空', miss.uk_ipa, '');
+
+  // ---- 幂等：再跑一次不重复处理已补好的 ----
+  const r2 = await fetchPhonetics(db, [], offlineService, { allowOnline: false });
+  eq('二次调用只处理剩下的 1 个', r2.total, 1);
+
+  // ---- 不覆盖已有音标 ----
+  db.run('UPDATE words SET uk_ipa=?, us_ipa=? WHERE word=?', ['/手写音标/', '', 'apple']);
+  await fetchPhonetics(db, [], offlineService, { allowOnline: false });
+  const ap = db.get('SELECT * FROM words WHERE word=?', ['apple']);
+  eq('不会覆盖已有音标', ap.uk_ipa, '/手写音标/');
+
+  // ---- 只处理指定 id ----
+  const db2 = freshDb();
+  const rows2 = ['achieve', 'immune'].map((w, i) => ({
+    word: w, display: w, translation: '义' + i, pos: [], ukIpa: '', usIpa: '',
+    example: '', exampleTranslation: '', keep: true,
+  }));
+  const p2 = buildImportPreview(db2, rows2);
+  commitImport(db2, { name: 'l2', sourceType: 'paste', rows: p2.rows });
+  const oneId = db2.get('SELECT id FROM words WHERE word=?', ['achieve']).id;
+  const r3 = await fetchPhonetics(db2, [oneId], offlineService, { allowOnline: false });
+  eq('只处理传入的那 1 个', r3.total, 1);
+  eq('另一个仍未补', db2.get('SELECT uk_ipa FROM words WHERE word=?', ['immune']).uk_ipa, '');
+}
+
+{
+  // ---- 音标展示格式 ----
+  eq('英式美式不同 → 都显示',
+    phoneticOf({ uk_ipa: '/əˈbændən/', us_ipa: '/əˈbændɑːn/' }),
+    '/əˈbændən/   /əˈbændɑːn/');
+  eq('英式美式相同 → 只显示一个',
+    phoneticOf({ uk_ipa: '/test/', us_ipa: '/test/' }), '/test/');
+  eq('只有英式 → 显示英式', phoneticOf({ uk_ipa: '/test/', us_ipa: '' }), '/test/');
+  eq('只有美式 → 显示美式', phoneticOf({ uk_ipa: '', us_ipa: '/us/' }), '/us/');
+  eq('都没有 → 空字符串', phoneticOf({ uk_ipa: '', us_ipa: '' }), '');
+  eq('字段缺失也不崩', phoneticOf({}), '');
+
+  // ---- 出题时音标出现在单词下方 ----
+  const word = {
+    id: 1, word: 'abandon', display_word: 'abandon',
+    original_translation: '放弃', part_of_speech: 'v',
+    uk_ipa: '/əˈbændən/', us_ipa: '', english_example: '',
+  };
+  const other = { ...word, id: 2, word: 'apple', display_word: 'apple', original_translation: '苹果' };
+  const q = buildQuestion(word, [word, other], { types: ['en2cn'], rng: makeRng(3) });
+  eq('题干是英文单词', q.prompt, 'abandon');
+  eq('单词下方显示音标', q.promptSub, '/əˈbændən/');
+  eq('题干类型是英文', q.promptKind, 'en');
+
+  // 中文题干不显示音标（否则等于泄题）
+  const q2 = buildQuestion(word, [word, other], { types: ['cn2en'], rng: makeRng(3) });
+  ok('看中文选英文时不显示音标', !String(q2.promptSub || '').includes('əˈbændən'),
+    q2.promptSub);
 }
 
 /* ================================================================

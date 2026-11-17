@@ -285,6 +285,7 @@ if (APP) {
   const previewText = modalRoot.textContent || '';
   ok('弹出导入预览', /导入预览/.test(previewText), previewText.slice(0, 100));
   ok('预览显示解析到 6 个单词', /6 个单词/.test(previewText), previewText.slice(0, 200));
+  ok('预览有「自动获取音标」选项', /自动获取音标/.test(previewText), previewText.slice(0, 300));
 
   const importBtn = findBtn(modalRoot, '确认导入');
   ok('预览有确认导入按钮', !!importBtn);
@@ -293,6 +294,15 @@ if (APP) {
 
   const cnt = APP.S.db.get('SELECT COUNT(*) AS c FROM words').c;
   ok('导入后词库有 6 个单词', cnt === 6, '实际 ' + cnt);
+
+  // 勾了「自动获取音标」，导入后应当自动补上（离线词典同步完成）
+  await new Promise((r) => setTimeout(r, 1500));
+  const withIpa = APP.S.db.get(
+    `SELECT COUNT(*) AS c FROM words WHERE COALESCE(TRIM(uk_ipa),'') <> ''`).c;
+  ok('导入时自动补上了音标', withIpa >= 4, '有音标的词数 ' + withIpa + '/6');
+  const ipaSample = APP.S.db.get('SELECT word, uk_ipa FROM words WHERE word=?', ['abandon']);
+  ok('音标带首尾斜杠', !!(ipaSample && ipaSample.uk_ipa && ipaSample.uk_ipa.startsWith('/')),
+    ipaSample && ipaSample.uk_ipa);
 
   // --- 2) 核对 ---
   const pending = APP.S.db.get(
@@ -341,6 +351,12 @@ if (APP) {
   ok('首页显示新词进度', /新词/.test(homeTxt));
   ok('首页有新词学习按钮', !!findBtn(screen, '开始新词学习'));
 
+  // 设置页应有「获取音标」入口
+  APP.navigate('settings');
+  const setTxt = screen.textContent || '';
+  ok('设置页有获取音标入口', /获取音标|都已有音标/.test(setTxt), setTxt.slice(0, 200));
+  APP.navigate('home');
+
   // --- 4) 学习会话 ---
   APP.startSession('new');
   const qtxt = screen.textContent || '';
@@ -353,6 +369,13 @@ if (APP) {
   ok('会话里有当前题目', !!cur);
 
   if (cur) {
+    // 音标显示在单词下方（仅英文题干；中文题干显示音标等于泄题）
+    if (cur.q.promptKind === 'en') {
+      ok('英文题干下方显示音标', /^\/.+\/$/.test(cur.q.promptSub || ''), cur.q.promptSub);
+    } else {
+      ok('中文题干不显示音标', !/^\/.+\/$/.test(cur.q.promptSub || ''), cur.q.promptSub);
+    }
+
     if (cur.q.type === 'spell') {
       const inp = descendants(screen).find((n) => n.tagName === 'INPUT');
       ok('拼写题有输入框', !!inp);

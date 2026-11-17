@@ -166,6 +166,7 @@ export const DEFAULT_SETTINGS = {
   theme: 'auto',
   question_types: 'en2cn,cn2en,spell,en2def',
   spelling_enabled: '1',
+  auto_phonetic: '1',
   reinforce_extra: '2',
   reinforce_max: '3',
   dict_online_enabled: '1',
