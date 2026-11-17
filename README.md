@@ -53,7 +53,7 @@ python serve.py
 | 平台 | 路径 | 说明 |
 |---|---|---|
 | Android | `android/build/词忆.apk` | 已签名，直接覆盖安装即可，数据不丢 |
-| iOS | `ios/build/CiYi-unsigned.ipa` | 未签名，需用 Sideloadly 等重签 |
+| iOS | `ios/build/CiYi.ipa` | 未签名，需用 Sideloadly 等重签 |
 
 覆盖安装能生效的前提是应用身份不变：
 

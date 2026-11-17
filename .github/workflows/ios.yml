@@ -77,13 +77,13 @@ jobs:
           mkdir -p out/Payload
           cp -R "$APP" out/Payload/
           cd out
-          zip -qry CiYi-unsigned.ipa Payload
+          zip -qry CiYi.ipa Payload
           echo "IPA 大小："
-          ls -la CiYi-unsigned.ipa
+          ls -la CiYi.ipa
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: CiYi-unsigned-ipa
-          path: out/CiYi-unsigned.ipa
+          name: CiYi-ipa
+          path: out/CiYi.ipa
           if-no-files-found: error

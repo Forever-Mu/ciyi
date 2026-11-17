@@ -40,8 +40,8 @@ git push -u origin main
 1. 打开仓库页面 → **Actions** 标签
 2. 左边选 **Build unsigned IPA** → 右边 **Run workflow**
 3. 等 3~6 分钟
-4. 进入这次运行 → 页面底部 **Artifacts** → 下载 `CiYi-unsigned-ipa`
-5. 解压得到 `CiYi-unsigned.ipa`
+4. 进入这次运行 → 页面底部 **Artifacts** → 下载 `CiYi-ipa`
+5. 解压得到 `CiYi.ipa`
 
 > `.gitignore` 已经排除了 `data/_raw/`（63MB 的 ECDICT 原始 csv），仓库推上去只有几 MB。
 
@@ -66,7 +66,7 @@ ipa 是**未签名**的，iOS 不会直接接受。三种签法：
 | **Apple 开发者账号 + 自签** | $99/年 | 1 年 | 可注册设备清单，适合长期用 |
 | **TestFlight** | $99/年 | 90 天/版 | 需要上传到 App Store Connect |
 
-用 Sideloadly 的流程：把 `CiYi-unsigned.ipa` 拖进去 → 填自己的 Apple ID → 手机连电脑 → Start → 手机上到「设置 → 通用 → VPN与设备管理」信任证书。
+用 Sideloadly 的流程：把 `CiYi.ipa` 拖进去 → 填自己的 Apple ID → 手机连电脑 → Start → 手机上到「设置 → 通用 → VPN与设备管理」信任证书。
 
 ---
 
