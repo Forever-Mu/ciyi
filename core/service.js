@@ -360,12 +360,25 @@ export function countMissingPhonetics(db, wordIds) {
 export async function fetchPhonetics(db, wordIds, dictService, opts = {}) {
   const allowOnline = opts.allowOnline !== false && !!(dictService && dictService.remote);
   const onProgress = typeof opts.onProgress === 'function' ? opts.onProgress : null;
+  // 在线连续失败这么多次就熔断，避免每个词都重试 3 次 × 12 秒
+  const maxConsecutiveOnlineFailures = opts.maxOnlineFailures == null ? 3 : opts.maxOnlineFailures;
 
   const ids = Array.isArray(wordIds) && wordIds.length
     ? wordIds
     : db.all('SELECT id FROM words ORDER BY id').map((r) => r.id);
 
-  const result = { total: 0, fromOffline: 0, fromOnline: 0, stillMissing: 0 };
+  const result = {
+    total: 0,
+    fromOffline: 0,
+    fromOnline: 0,
+    stillMissing: 0,
+    onlineTried: 0,
+    onlineFailed: 0,
+    onlineSkipped: 0,     // 熔断后跳过的在线查询次数
+    onlineDisabled: !allowOnline,
+  };
+
+  let consecutiveFailures = 0;
 
   for (const id of ids) {
     const w = db.get('SELECT id, word, uk_ipa, us_ipa FROM words WHERE id=?', [id]);
@@ -397,15 +410,26 @@ export async function fetchPhonetics(db, wordIds, dictService, opts = {}) {
     // ---- 2) 在线补英/美差异（可选）----
     const needOnline = (!uk || !us) && allowOnline;
     if (needOnline) {
-      let r = null;
-      try {
-        r = await dictService.remote.lookup(w.word);
-      } catch (e) { r = null; }
-      if (r && r.ok) {
-        let got = false;
-        if (!uk && r.ukIpa) { uk = r.ukIpa; got = true; }
-        if (!us && r.usIpa) { us = r.usIpa; got = true; }
-        if (got) result.fromOnline++;
+      if (consecutiveFailures >= maxConsecutiveOnlineFailures) {
+        result.onlineSkipped++;             // 已经熔断，不再浪费请求
+      } else {
+        result.onlineTried++;
+        let r = null;
+        try {
+          r = await dictService.remote.lookup(w.word);
+        } catch (e) {
+          r = { ok: false, error: String(e && e.message || e) };
+        }
+        if (r && r.ok) {
+          consecutiveFailures = 0;
+          let got = false;
+          if (!uk && r.ukIpa) { uk = r.ukIpa; got = true; }
+          if (!us && r.usIpa) { us = r.usIpa; got = true; }
+          if (got) result.fromOnline++;
+        } else {
+          consecutiveFailures++;
+          result.onlineFailed++;
+        }
       }
     }
 

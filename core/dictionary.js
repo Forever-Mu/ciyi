@@ -10,7 +10,7 @@
  * 封装成统一接口，以后换词典实现只要实现 lookup 即可。
  */
 
-import { readBinary, getFflate, fetchJson, hasNetwork } from './platform.js';
+import { readBinary, getFflate, fetchJson } from './platform.js';
 import { extractPos, cleanIpa, setSynonymMap } from './text.js';
 
 /**
@@ -102,7 +102,8 @@ export class RemoteDictionary {
     const k = String(word || '').trim().toLowerCase();
     if (!k) return { ok: false, error: '空单词' };
     if (!this.enabled) return { ok: false, error: '在线词典已关闭' };
-    if (!hasNetwork()) return { ok: false, error: '当前处于离线状态' };
+    // 不要用 hasNetwork() 提前拦——WebView 里 navigator.onLine 不可靠，
+    // 提前拦会让"明明有网却永远查不到"。直接发请求，失败就失败。
     if (this.cache.has(k)) return this.cache.get(k);
 
     const url = API_BASE + encodeURIComponent(k);

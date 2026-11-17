@@ -182,7 +182,7 @@ def main():
          "-R", compiled, "--auto-add-overlay",
          "-A", assets,
          "--min-sdk-version", MIN_SDK, "--target-sdk-version", TARGET_SDK,
-         "--version-code", "4", "--version-name", "1.1.3"], "aapt2 link")
+         "--version-code", "5", "--version-name", "1.1.4"], "aapt2 link")
     log("      基础 APK %.0f KB" % (os.path.getsize(base_apk) / 1024.0))
 
     # ---------- 4) javac ----------

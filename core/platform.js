@@ -79,7 +79,15 @@ export async function fetchJson(url, opts = {}) {
   }
 }
 
-/** 是否有网络能力（离线时应直接跳过远程查询） */
+/**
+ * 是否在线
+ *
+ * 注意：这个结果**只能当参考**，不能用它来决定"要不要发请求"。
+ *   · Android WebView 里 navigator.onLine 需要 ACCESS_NETWORK_STATE 权限才可靠，
+ *     没有该权限时往往恒为 false；
+ *   · 即使有权限，navigator.onLine 也只是"有没有网络接口"，不代表能连上目标服务器。
+ * 所以调用方应当直接发请求、让请求自己失败，而不是在这里提前拦掉。
+ */
 export function hasNetwork() {
   if (typeof navigator !== 'undefined' && typeof navigator.onLine === 'boolean') {
     return navigator.onLine;

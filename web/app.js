@@ -51,7 +51,7 @@ const ROUTES = {
   study: { title: '学习', sub: () => '新词与复习' },
   library: { title: '词库', sub: () => '' },
   stats: { title: '统计', sub: () => '真实数据，实时计算' },
-  settings: { title: '设置', sub: () => 'v1.1.3' },
+  settings: { title: '设置', sub: () => 'v1.1.4' },
   plan: { title: '学习计划', sub: () => '定好节奏，之后每天自动安排' },
   check: { title: '翻译核对报告', sub: () => '' },
   import: { title: '导入单词', sub: () => '' },
@@ -113,15 +113,50 @@ function icon(name, size = 20) {
 /* ================================================================
  *  Toast / Sheet / Confirm
  * ================================================================ */
+/** 每条 toast 的定时器，用于去重时重置 */
+const toastTimers = new Map();
+
+/**
+ * 弹提示
+ * 相同文案在显示期内不叠加，只重置计时——否则连点按钮会叠一堆一模一样的提示。
+ */
 function toast(msg, type = 'info', ms = 2200) {
   const root = document.getElementById('toastRoot');
-  const el = h('div', { class: 'toast' }, msg);
+  if (!root) return;
+  const text = String(msg);
+
+  const existing = Array.from(root.children).find(
+    (el) => el.dataset && el.dataset.msg === text && !el.classList.contains('out')
+  );
+  if (existing) {
+    const t = toastTimers.get(existing);
+    if (t) clearTimeout(t);
+    const timer = setTimeout(() => {
+      existing.classList.add('out');
+      setTimeout(() => existing.remove(), 220);
+      toastTimers.delete(existing);
+    }, ms);
+    toastTimers.set(existing, timer);
+    return;
+  }
+
+  const el = h('div', { class: 'toast', dataset: { msg: text } }, text);
   root.appendChild(el);
-  setTimeout(() => {
+
+  const timer = setTimeout(() => {
     el.classList.add('out');
     setTimeout(() => el.remove(), 220);
+    toastTimers.delete(el);
   }, ms);
-  while (root.children.length > 3) root.firstChild.remove();
+  toastTimers.set(el, timer);
+
+  while (root.children.length > 3) {
+    const first = root.firstChild;
+    const t = toastTimers.get(first);
+    if (t) clearTimeout(t);
+    toastTimers.delete(first);
+    first.remove();
+  }
 }
 
 function sheet({ title, body, footer, onClose }) {
@@ -836,7 +871,15 @@ async function runTranslationCheck() {
  * @param {number[]} wordIds  空 = 全库
  * @param {{quietIfNone?:boolean}} opts
  */
+let phoneticRunning = false;
+
 async function runPhoneticFetch(wordIds, opts = {}) {
+  // 并发锁：上一次还没跑完就再点，直接忽略，避免叠出一堆进度弹窗和提示
+  if (phoneticRunning) {
+    if (!opts.quietIfNone) toast('正在获取音标，请稍候', 'info', 1600);
+    return null;
+  }
+
   const ids = Array.isArray(wordIds) && wordIds.length
     ? wordIds
     : S.db.all('SELECT id FROM words ORDER BY id').map((r) => r.id);
@@ -847,6 +890,7 @@ async function runPhoneticFetch(wordIds, opts = {}) {
     return null;
   }
 
+  phoneticRunning = true;
   const total = missing;
   const bar = h('i', { style: 'width:0%' });
   const label = h('div', { class: 'tiny muted', text: `0 / ${total}` });
@@ -873,16 +917,32 @@ async function runPhoneticFetch(wordIds, opts = {}) {
     });
   } finally {
     m.close();
+    phoneticRunning = false;
   }
 
   scheduleSave();
+
+  // 提示要说清楚"为什么还缺"，否则用户不知道是没网还是词典真没有
   const parts = [];
-  if (res.fromOffline) parts.push(`离线 ${res.fromOffline}`);
-  if (res.fromOnline) parts.push(`在线 ${res.fromOnline}`);
-  if (res.stillMissing) parts.push(`仍缺 ${res.stillMissing}`);
+  if (res.fromOffline) parts.push(`离线补上 ${res.fromOffline}`);
+  if (res.fromOnline) parts.push(`在线补上 ${res.fromOnline}`);
+
+  let tail = '';
+  if (res.stillMissing > 0) {
+    parts.push(`仍缺 ${res.stillMissing}`);
+    if (res.onlineDisabled) {
+      tail = '（离线词典没有这些词；「联网时补充音标」是关闭的）';
+    } else if (res.onlineFailed > 0) {
+      tail = '（离线词典没有，在线查询也失败了，检查网络后重试）';
+    } else {
+      tail = '（离线词典和在线词典都没有这些词）';
+    }
+  }
+
   toast(
-    parts.length ? `音标补齐：${parts.join('，')}` : '没有需要补的单词',
-    res.stillMissing > 0 ? 'warn' : 'ok', 3200
+    parts.length ? `音标补齐：${parts.join('，')}${tail}` : '没有需要补的单词',
+    res.stillMissing > 0 ? 'warn' : 'ok',
+    tail ? 5000 : 3200
   );
   render();
   return res;
@@ -1713,7 +1773,7 @@ function screenSettings() {
     h('div', { class: 'card' },
       h('div', { class: 'card-head' }, h('h3', { text: '关于' })),
       h('div', { class: 'card-body stack', style: 'gap:8px' },
-        h('div', { class: 'hint-text', text: '词忆 v1.1.3 · 纯本地离线背单词' }),
+        h('div', { class: 'hint-text', text: '词忆 v1.1.4 · 纯本地离线背单词' }),
         h('div', { class: 'hint-text', text: '词典数据来源：ECDICT（MIT 开源英汉词典）' }),
         h('div', { class: 'hint-text', text: '在线补充：dictionaryapi.dev' })))
   );

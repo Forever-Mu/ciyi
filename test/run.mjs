@@ -1350,6 +1350,84 @@ section('21. 音标获取与展示');
     q2.promptSub);
 }
 
+{
+  // ---- navigator.onLine 不可靠时，不能因此拦掉在线请求 ----
+  // （Android WebView 缺 ACCESS_NETWORK_STATE 权限时 navigator.onLine 恒为 false）
+  const origFetch = globalThis.fetch;
+  try {
+    let fetched = 0;
+    globalThis.fetch = async () => {
+      fetched++;
+      return {
+        ok: true, status: 200, headers: { get: () => null },
+        json: async () => [{
+          word: 'x', phonetic: '/x/', phonetics: [{ text: '/x/' }],
+          meanings: [{ partOfSpeech: 'noun', definitions: [{ definition: 'd' }] }],
+        }],
+      };
+    };
+    Object.defineProperty(globalThis, 'navigator', {
+      value: { onLine: false }, configurable: true, writable: true,
+    });
+
+    const r = new RemoteDictionary({ minInterval: 0, maxRetries: 0 });
+    const res = await r.lookup('whatever');
+    eq('onLine=false 时仍然真的发出了请求', fetched, 1);
+    ok('而且拿到了结果', res.ok === true, JSON.stringify(res));
+  } finally {
+    globalThis.fetch = origFetch;
+    Object.defineProperty(globalThis, 'navigator', {
+      value: { onLine: true }, configurable: true, writable: true,
+    });
+  }
+}
+
+{
+  // ---- 在线连续失败要熔断，别每个词都重试 ----
+  const db = freshDb();
+  const words = [];
+  for (let i = 0; i < 10; i++) words.push('zzzz' + i);
+  const rows = words.map((w, i) => ({
+    word: w, display: w, translation: '义' + i, pos: [], ukIpa: '', usIpa: '',
+    example: '', exampleTranslation: '', keep: true,
+  }));
+  const p = buildImportPreview(db, rows);
+  commitImport(db, { name: '熔断', sourceType: 'paste', rows: p.rows });
+
+  let calls = 0;
+  const fakeRemote = {
+    enabled: true,
+    async lookup() { calls++; return { ok: false, error: 'boom' }; },
+  };
+  const svc = new DictionaryService({ local: dict, remote: fakeRemote });
+
+  const r = await fetchPhonetics(db, [], svc, { allowOnline: true, maxOnlineFailures: 3 });
+  eq('只尝试了 3 次在线', calls, 3);
+  eq('记录在线尝试次数', r.onlineTried, 3);
+  eq('记录在线失败次数', r.onlineFailed, 3);
+  eq('其余跳过在线', r.onlineSkipped, 7);
+  eq('10 个词仍然都缺', r.stillMissing, 10);
+  ok('标记在线开关是开的', r.onlineDisabled === false);
+}
+
+{
+  // ---- 在线开关关闭时不应发起请求 ----
+  const db = freshDb();
+  const rows = [{ word: 'zzzq', display: 'zzzq', translation: '义', pos: [],
+    ukIpa: '', usIpa: '', example: '', exampleTranslation: '', keep: true }];
+  const p = buildImportPreview(db, rows);
+  commitImport(db, { name: '关在线', sourceType: 'paste', rows: p.rows });
+
+  let calls = 0;
+  const fakeRemote = { enabled: true, async lookup() { calls++; return { ok: true, ukIpa: '/x/' }; } };
+  const svc = new DictionaryService({ local: dict, remote: fakeRemote });
+
+  const r = await fetchPhonetics(db, [], svc, { allowOnline: false });
+  eq('关闭在线时一次都不请求', calls, 0);
+  eq('记录在线被禁用', r.onlineDisabled, true);
+  eq('仍然是缺', r.stillMissing, 1);
+}
+
 /* ================================================================
  *  汇总
  * ================================================================ */

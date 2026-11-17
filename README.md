@@ -46,6 +46,22 @@ python serve.py
 
 需要 **Python 3**（只用标准库，无第三方依赖）。
 
+### 安装包产物
+
+版本更新后**直接覆盖这两个文件**，不生成带版本号的新文件名：
+
+| 平台 | 路径 | 说明 |
+|---|---|---|
+| Android | `android/build/词忆.apk` | 已签名，直接覆盖安装即可，数据不丢 |
+| iOS | `ios/build/CiYi-unsigned.ipa` | 未签名，需用 Sideloadly 等重签 |
+
+覆盖安装能生效的前提是应用身份不变：
+
+- Android 包名 `com.wordmemory.app`，`versionCode` 每次递增（当前 4），`versionName` 跟着版本走
+- iOS Bundle ID `com.wordmemory.app`，`CFBundleVersion` 每次递增
+
+> 安卓如果提示「应用未安装」，多半是 `versionCode` 没递增——它必须比已装的那份大。
+
 ---
 
 ## 界面
